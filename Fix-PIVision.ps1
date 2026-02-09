@@ -1,79 +1,46 @@
-Write-Host "=== FINAL FIX PI VISION UI - WINDOWS SERVER 2022 ===" -ForegroundColor Cyan
+Write-Host "=== FINAL FIX PI VISION UI - WS2022 ===" -ForegroundColor Cyan
 
 Import-Module WebAdministration
 
-# 1. Stop IIS
-Write-Host "Stopping IIS..."
-iisreset /stop
+# Stop IIS
+iisreset /stop | Out-Null
 
-# 2. Disable IIS Compression (SVG MUSUH COMPRESSION)
-Write-Host "Disabling IIS Compression..."
-Set-WebConfigurationProperty -Filter system.webServer/urlCompression `
-    -Name doStaticCompression -Value false
-Set-WebConfigurationProperty -Filter system.webServer/urlCompression `
-    -Name doDynamicCompression -Value false
+# Paths
+$sitePath = "IIS:\Sites\Default Web Site\PIVision"
+$mimePath = "IIS:\MimeTypes"
 
-# 3. Remove ALL existing MIME mappings that break PI Vision
-Write-Host "Cleaning existing MIME mappings..."
-$mimePath = "MACHINE/WEBROOT/APPHOST"
-$mimeFilter = "system.webServer/staticContent/mimeMap"
+# 1. REMOVE ALL PROBLEMATIC MIME TYPES (clean slate)
+$badExt = ".svg",".json",".woff",".woff2",".ttf",".eot"
+Get-ChildItem $mimePath | Where-Object { $badExt -contains $_.Extension } | Remove-Item -Force
 
-Get-WebConfigurationProperty -pspath $mimePath -filter $mimeFilter -name "." |
-Where-Object { $_.fileExtension -in ".svg",".json",".woff",".woff2",".ttf",".eot" } |
-ForEach-Object {
-    Remove-WebConfigurationProperty -pspath $mimePath `
-        -filter "system.webServer/staticContent" `
-        -name "." `
-        -AtElement @{fileExtension=$_.fileExtension}
-}
+# 2. ADD CORRECT MIME TYPES (ONCE)
+New-ItemProperty $mimePath -Name "." -Force | Out-Null
+New-ItemProperty $mimePath -Name ".svg"   -Value @{mimeType="image/svg+xml"} | Out-Null
+New-ItemProperty $mimePath -Name ".json"  -Value @{mimeType="application/json"} | Out-Null
+New-ItemProperty $mimePath -Name ".woff"  -Value @{mimeType="font/woff"} | Out-Null
+New-ItemProperty $mimePath -Name ".woff2" -Value @{mimeType="font/woff2"} | Out-Null
+New-ItemProperty $mimePath -Name ".ttf"   -Value @{mimeType="font/ttf"} | Out-Null
+New-ItemProperty $mimePath -Name ".eot"   -Value @{mimeType="application/vnd.ms-fontobject"} | Out-Null
 
-# 4. Re-add MIME types (SAFE & CLEAN)
-Write-Host "Adding correct MIME types..."
-Add-WebConfigurationProperty -pspath $mimePath `
-  -filter "system.webServer/staticContent" -name "." `
-  -value @{fileExtension=".svg"; mimeType="image/svg+xml"}
+# 3. DISABLE IIS COMPRESSION (SVG MUSUH BESAR)
+Set-WebConfigurationProperty -Filter system.webServer/httpCompression `
+  -Name enabled -Value false -PSPath 'MACHINE/WEBROOT/APPHOST'
 
-Add-WebConfigurationProperty -pspath $mimePath `
-  -filter "system.webServer/staticContent" -name "." `
-  -value @{fileExtension=".json"; mimeType="application/json"}
+# 4. REQUEST FILTERING - ALLOW EVERYTHING PI VISION NEEDS
+$rf = "system.webServer/security/requestFiltering/fileExtensions"
+Get-WebConfigurationProperty -PSPath $sitePath -Filter $rf -Name "." | Remove-WebConfigurationProperty -Name "." -AtElement @{fileExtension="*"}
 
-Add-WebConfigurationProperty -pspath $mimePath `
-  -filter "system.webServer/staticContent" -name "." `
-  -value @{fileExtension=".woff"; mimeType="font/woff"}
+Add-WebConfigurationProperty -PSPath $sitePath -Filter $rf -Name "." `
+  -Value @{fileExtension="*"; allowed="true"}
 
-Add-WebConfigurationProperty -pspath $mimePath `
-  -filter "system.webServer/staticContent" -name "." `
-  -value @{fileExtension=".woff2"; mimeType="font/woff2"}
+# 5. STATIC CONTENT HANDLER (ENSURE ENABLED)
+Set-WebConfigurationProperty -PSPath $sitePath `
+ -Filter "system.webServer/staticContent" -Name "." -Value ""
 
-Add-WebConfigurationProperty -pspath $mimePath `
-  -filter "system.webServer/staticContent" -name "." `
-  -value @{fileExtension=".ttf"; mimeType="font/ttf"}
+# 6. CLEAR IIS CACHE
+Remove-Item "C:\inetpub\temp\IIS Temporary Compressed Files\*" -Recurse -Force -ErrorAction SilentlyContinue
 
-Add-WebConfigurationProperty -pspath $mimePath `
-  -filter "system.webServer/staticContent" -name "." `
-  -value @{fileExtension=".eot"; mimeType="application/vnd.ms-fontobject"}
+# Start IIS
+iisreset /start | Out-Null
 
-# 5. Allow SVG in Request Filtering
-Write-Host "Fixing RequestFiltering..."
-Set-WebConfigurationProperty -pspath $mimePath `
-  -filter "system.webServer/security/requestFiltering/fileExtensions/add[@fileExtension='.svg']" `
-  -name allowed -value true -ErrorAction SilentlyContinue
-
-# 6. Fix Folder Permission
-Write-Host "Fixing folder permissions..."
-$paths = @(
- "C:\Program Files\PIPC\PIVision",
- "C:\inetpub\wwwroot\PIVision"
-)
-
-foreach ($p in $paths) {
-    if (Test-Path $p) {
-        icacls $p /grant "IIS_IUSRS:(OI)(CI)RX" /T | Out-Null
-    }
-}
-
-# 7. Start IIS
-Write-Host "Starting IIS..."
-iisreset /start
-
-Write-Host "=== DONE. REBOOT SERVER SEKARANG (WAJIB) ===" -ForegroundColor Green
+Write-Host "DONE. REBOOT SERVER SEKARANG." -ForegroundColor Green
