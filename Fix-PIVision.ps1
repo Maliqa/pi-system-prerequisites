@@ -1,46 +1,59 @@
-Write-Host "=== FINAL FIX PI VISION UI - WS2022 ===" -ForegroundColor Cyan
+Write-Host "=== PI VISION UI VALIDATION (SAFE MODE) ===" -ForegroundColor Cyan
 
+# 1. OS Check
+Write-Host "`n[1] OS Version"
+Get-ComputerInfo | Select-Object OsName, OsVersion
+
+# 2. IIS Installed?
+Write-Host "`n[2] IIS Installed?"
+Get-WindowsFeature Web-Server | Select Name, InstallState
+
+# 3. Static Content Feature
+Write-Host "`n[3] Static Content Feature"
+Get-WindowsFeature Web-Static-Content | Select Name, InstallState
+
+# 4. MIME Types Validation (READ ONLY)
+Write-Host "`n[4] MIME Types Check"
 Import-Module WebAdministration
 
-# Stop IIS
-iisreset /stop | Out-Null
+$mimeList = @("image/svg+xml","application/json","application/font-woff","application/font-woff2")
 
-# Paths
-$sitePath = "IIS:\Sites\Default Web Site\PIVision"
-$mimePath = "IIS:\MimeTypes"
+Get-WebConfigurationProperty `
+  -Filter system.webServer/staticContent/mimeMap `
+  -Name "." |
+Where-Object { $mimeList -contains $_.mimeType } |
+Select fileExtension, mimeType
 
-# 1. REMOVE ALL PROBLEMATIC MIME TYPES (clean slate)
-$badExt = ".svg",".json",".woff",".woff2",".ttf",".eot"
-Get-ChildItem $mimePath | Where-Object { $badExt -contains $_.Extension } | Remove-Item -Force
+# 5. Check PI Vision Image Folder
+$imgPath = "C:\Program Files\PIPC\PIVision\Images"
+Write-Host "`n[5] PI Vision Images Folder"
+if (Test-Path $imgPath) {
+    Write-Host "FOUND: $imgPath" -ForegroundColor Green
+    Get-ChildItem $imgPath -Filter *.svg | Select-Object -First 5
+} else {
+    Write-Host "NOT FOUND: $imgPath" -ForegroundColor Red
+}
 
-# 2. ADD CORRECT MIME TYPES (ONCE)
-New-ItemProperty $mimePath -Name "." -Force | Out-Null
-New-ItemProperty $mimePath -Name ".svg"   -Value @{mimeType="image/svg+xml"} | Out-Null
-New-ItemProperty $mimePath -Name ".json"  -Value @{mimeType="application/json"} | Out-Null
-New-ItemProperty $mimePath -Name ".woff"  -Value @{mimeType="font/woff"} | Out-Null
-New-ItemProperty $mimePath -Name ".woff2" -Value @{mimeType="font/woff2"} | Out-Null
-New-ItemProperty $mimePath -Name ".ttf"   -Value @{mimeType="font/ttf"} | Out-Null
-New-ItemProperty $mimePath -Name ".eot"   -Value @{mimeType="application/vnd.ms-fontobject"} | Out-Null
+# 6. Permission Check (READ ONLY)
+Write-Host "`n[6] Folder Permission Check"
+icacls $imgPath
 
-# 3. DISABLE IIS COMPRESSION (SVG MUSUH BESAR)
-Set-WebConfigurationProperty -Filter system.webServer/httpCompression `
-  -Name enabled -Value false -PSPath 'MACHINE/WEBROOT/APPHOST'
+# 7. IIS App Pool Identity
+Write-Host "`n[7] Application Pool Identity"
+Get-Item IIS:\AppPools\PIVisionAppPool | Select-Object name, state
 
-# 4. REQUEST FILTERING - ALLOW EVERYTHING PI VISION NEEDS
-$rf = "system.webServer/security/requestFiltering/fileExtensions"
-Get-WebConfigurationProperty -PSPath $sitePath -Filter $rf -Name "." | Remove-WebConfigurationProperty -Name "." -AtElement @{fileExtension="*"}
+# 8. Test SVG via IIS (HEAD request)
+Write-Host "`n[8] HTTP SVG Test"
+try {
+    $r = Invoke-WebRequest `
+        -Uri "http://localhost/PIVision/Images/icon.svg" `
+        -Method Head `
+        -UseBasicParsing
+    Write-Host "HTTP STATUS: $($r.StatusCode)" -ForegroundColor Green
+}
+catch {
+    Write-Host "HTTP ERROR:" -ForegroundColor Red
+    Write-Host $_.Exception.Message
+}
 
-Add-WebConfigurationProperty -PSPath $sitePath -Filter $rf -Name "." `
-  -Value @{fileExtension="*"; allowed="true"}
-
-# 5. STATIC CONTENT HANDLER (ENSURE ENABLED)
-Set-WebConfigurationProperty -PSPath $sitePath `
- -Filter "system.webServer/staticContent" -Name "." -Value ""
-
-# 6. CLEAR IIS CACHE
-Remove-Item "C:\inetpub\temp\IIS Temporary Compressed Files\*" -Recurse -Force -ErrorAction SilentlyContinue
-
-# Start IIS
-iisreset /start | Out-Null
-
-Write-Host "DONE. REBOOT SERVER SEKARANG." -ForegroundColor Green
+Write-Host "`n=== VALIDATION DONE (NO SYSTEM CHANGES) ===" -ForegroundColor Cyan
