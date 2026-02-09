@@ -1,92 +1,134 @@
-# =========================================================
-# FINAL FIX PI VISION UI (ICON BROKEN)
-# Windows Server 2022
-# =========================================================
+Write-Host "=== FINAL FIX PI VISION UI - WINDOWS SERVER 2022 ===" -ForegroundColor Cyan
 
-Write-Host "=== FINAL FIX PI VISION UI - WS2022 ===" -ForegroundColor Cyan
+# -----------------------------
+# 1. Pastikan IIS & Role Feature (SERVER WAY)
+# -----------------------------
+Write-Host "Installing IIS Features (Server method)..." -ForegroundColor Yellow
 
-Import-Module WebAdministration
+$features = @(
+    "Web-Server",
+    "Web-WebServer",
+    "Web-Common-Http",
+    "Web-Default-Doc",
+    "Web-Static-Content",
+    "Web-Http-Errors",
+    "Web-Http-Redirect",
+    "Web-Health",
+    "Web-Http-Logging",
+    "Web-Log-Libraries",
+    "Web-Request-Monitor",
+    "Web-Performance",
+    "Web-Stat-Compression",
+    "Web-Dyn-Compression",
+    "Web-Security",
+    "Web-Filtering",
+    "Web-Windows-Auth",
+    "Web-App-Dev",
+    "Web-Net-Ext45",
+    "Web-Asp-Net45",
+    "Web-ISAPI-Ext",
+    "Web-ISAPI-Filter",
+    "Web-Mgmt-Tools",
+    "Web-Mgmt-Console"
+)
 
-# 1. Stop IIS
-Write-Host "Stopping IIS..."
-iisreset /stop
-
-# 2. Disable IIS Compression (INI PENTING BANGET)
-Write-Host "Disabling IIS Compression..."
-
-Set-WebConfigurationProperty `
-  -Filter /system.webServer/httpCompression `
-  -Name dynamicCompressionEnabled `
-  -Value false
-
-Set-WebConfigurationProperty `
-  -Filter /system.webServer/httpCompression `
-  -Name staticCompressionEnabled `
-  -Value false
-
-# 3. Ensure Static Content handler
-Write-Host "Ensuring Static Content handler..."
-
-if (-not (Get-WebConfiguration "//handlers/add[@name='StaticFile']" -ErrorAction SilentlyContinue)) {
-    Add-WebConfiguration `
-      -Filter /system.webServer/handlers `
-      -Value @{
-        name="StaticFile";
-        path="*";
-        verb="*";
-        modules="StaticFileModule";
-        resourceType="Either";
-        requireAccess="Read"
-      }
+foreach ($f in $features) {
+    Install-WindowsFeature $f -ErrorAction SilentlyContinue | Out-Null
 }
 
-# 4. Fix MIME types (SVG & Fonts)
-Write-Host "Fixing MIME Types..."
+# -----------------------------
+# 2. Stop IIS
+# -----------------------------
+Write-Host "Stopping IIS..." -ForegroundColor Yellow
+iisreset /stop
+
+# -----------------------------
+# 3. Fix MIME TYPES (CRITICAL)
+# -----------------------------
+Write-Host "Fixing MIME Types..." -ForegroundColor Yellow
+Import-Module WebAdministration
 
 $mimeTypes = @{
-    ".svg"   = "image/svg+xml"
-    ".woff"  = "font/woff"
-    ".woff2" = "font/woff2"
-    ".ttf"   = "font/ttf"
-    ".eot"   = "application/vnd.ms-fontobject"
+    ".svg"  = "image/svg+xml"
+    ".woff" = "font/woff"
+    ".woff2"= "font/woff2"
+    ".ttf"  = "font/ttf"
+    ".eot"  = "application/vnd.ms-fontobject"
+    ".json" = "application/json"
 }
 
 foreach ($ext in $mimeTypes.Keys) {
-    if (-not (Get-WebConfiguration "//staticContent/mimeMap[@fileExtension='$ext']" -ErrorAction SilentlyContinue)) {
-        Add-WebConfiguration `
-          -Filter /system.webServer/staticContent `
-          -Value @{ fileExtension=$ext; mimeType=$mimeTypes[$ext] }
-    }
+    Remove-WebConfigurationProperty `
+        -pspath 'MACHINE/WEBROOT/APPHOST' `
+        -filter "system.webServer/staticContent/mimeMap[@fileExtension='$ext']" `
+        -name "." `
+        -ErrorAction SilentlyContinue
+
+    Add-WebConfigurationProperty `
+        -pspath 'MACHINE/WEBROOT/APPHOST' `
+        -filter "system.webServer/staticContent" `
+        -name "." `
+        -value @{ fileExtension=$ext; mimeType=$mimeTypes[$ext] }
 }
 
-# 5. Reset PI Vision cache (Angular)
-Write-Host "Clearing PI Vision cache..."
+# -----------------------------
+# 4. MATIKAN IIS COMPRESSION (BIANG KELADI UI RUSAK)
+# -----------------------------
+Write-Host "Disabling IIS Compression..." -ForegroundColor Yellow
+Set-WebConfigurationProperty `
+  -filter "system.webServer/httpCompression" `
+  -name "doStaticCompression" `
+  -value "false"
 
-$cachePaths = @(
-  "C:\Program Files\PIPC\PIVision\wwwroot\dist",
-  "C:\Program Files\PIPC\PIVision\Temp",
-  "C:\Windows\Temp"
+Set-WebConfigurationProperty `
+  -filter "system.webServer/httpCompression" `
+  -name "doDynamicCompression" `
+  -value "false"
+
+# -----------------------------
+# 5. Pastikan Static Content Handler
+# -----------------------------
+Write-Host "Ensuring Static Content Handler..." -ForegroundColor Yellow
+Set-WebConfigurationProperty `
+  -filter "system.webServer/modules/add[@name='StaticFileModule']" `
+  -name "preCondition" `
+  -value ""
+
+# -----------------------------
+# 6. Permission Folder PI Vision (INI WAJIB)
+# -----------------------------
+Write-Host "Fixing Folder Permissions..." -ForegroundColor Yellow
+
+$paths = @(
+ "C:\Program Files\PIPC\PIVision",
+ "C:\Program Files\PIPC\PIVision\Content",
+ "C:\Program Files\PIPC\PIVision\Images"
 )
 
-foreach ($path in $cachePaths) {
-    if (Test-Path $path) {
-        Get-ChildItem $path -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-    }
+foreach ($p in $paths) {
+    icacls $p /grant "IIS_IUSRS:(OI)(CI)RX" /T /C | Out-Null
 }
 
-# 6. Fix App Pool
-Write-Host "Fixing PI Vision AppPool..."
+# -----------------------------
+# 7. AppPool Identity (INI KRUSIAL)
+# -----------------------------
+Write-Host "Fixing AppPool Identity..." -ForegroundColor Yellow
 
-Set-ItemProperty IIS:\AppPools\PIVision `
-  -Name managedPipelineMode `
-  -Value Integrated
+Set-ItemProperty IIS:\AppPools\DefaultAppPool `
+ -name processModel.identityType `
+ -value ApplicationPoolIdentity
 
-Set-ItemProperty IIS:\AppPools\PIVision `
-  -Name processModel.identityType `
-  -Value ApplicationPoolIdentity
+# -----------------------------
+# 8. Clear IIS Cache
+# -----------------------------
+Write-Host "Clearing IIS Cache..." -ForegroundColor Yellow
+Remove-Item "C:\inetpub\temp\IIS Temporary Compressed Files" -Recurse -Force -ErrorAction SilentlyContinue
 
-# 7. Start IIS
-Write-Host "Starting IIS..."
+# -----------------------------
+# 9. Start IIS
+# -----------------------------
+Write-Host "Starting IIS..." -ForegroundColor Green
 iisreset /start
 
-Write-Host "=== DONE. CLEAR BROWSER CACHE & OPEN AGAIN ===" -ForegroundColor Green
+Write-Host "=== DONE ===" -ForegroundColor Green
+Write-Host "REBOOT SERVER SEKARANG (WAJIB)" -ForegroundColor Red
