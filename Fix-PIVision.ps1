@@ -1,13 +1,20 @@
-# ===============================
-# FIX PI VISION IIS & SSL ISSUES
-# ===============================
+# =========================================================
+# FIX PI VISION IIS + SSL + FEATURES (WINDOWS SERVER)
+# =========================================================
 
-Write-Host "=== FIXING PI VISION ENVIRONMENT ===" -ForegroundColor Cyan
+Write-Host "=== FIXING PI VISION ENVIRONMENT (SERVER MODE) ===" -ForegroundColor Cyan
 
-# -------------------------------
-# 1. Enable IIS Required Features
-# -------------------------------
-Write-Host "Enabling IIS Features..."
+# 1. Pastikan ini Windows Server
+$os = (Get-CimInstance Win32_OperatingSystem).Caption
+if ($os -notmatch "Server") {
+    Write-Host "ERROR: Script ini hanya untuk Windows Server!" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Detected OS: $os" -ForegroundColor Green
+
+# 2. Install IIS + Required Features
+Write-Host "Installing IIS & required features..." -ForegroundColor Yellow
 
 $features = @(
     "Web-Server",
@@ -19,11 +26,14 @@ $features = @(
     "Web-Http-Redirect",
     "Web-Health",
     "Web-Http-Logging",
+    "Web-Log-Libraries",
     "Web-Request-Monitor",
     "Web-Performance",
     "Web-Stat-Compression",
+    "Web-Dyn-Compression",
     "Web-Security",
     "Web-Filtering",
+    "Web-Basic-Auth",
     "Web-Windows-Auth",
     "Web-App-Dev",
     "Web-Net-Ext45",
@@ -34,69 +44,47 @@ $features = @(
     "Web-Mgmt-Console"
 )
 
-foreach ($f in $features) {
-    Enable-WindowsOptionalFeature -Online -FeatureName $f -NoRestart -ErrorAction SilentlyContinue
-}
+Install-WindowsFeature -Name $features -IncludeManagementTools
 
-# -------------------------------
-# 2. Generate Self-Signed SSL Cert
-# -------------------------------
-Write-Host "Creating Self-Signed Certificate..."
-
-$cert = New-SelfSignedCertificate `
-    -DnsName "localhost" `
-    -CertStoreLocation "cert:\LocalMachine\My" `
-    -FriendlyName "PI Vision SSL"
-
-# -------------------------------
-# 3. Bind HTTPS to IIS Default Site
-# -------------------------------
-Import-Module WebAdministration
-
-Write-Host "Configuring HTTPS binding..."
-
-Remove-WebBinding -Name "Default Web Site" -Protocol https -ErrorAction SilentlyContinue
-
-New-WebBinding -Name "Default Web Site" -Protocol https -Port 443
-
-$binding = Get-WebBinding -Name "Default Web Site" -Protocol https
-$binding.AddSslCertificate($cert.Thumbprint, "my")
-
-# -------------------------------
-# 4. Disable SSL Requirement for Content Folder
-# -------------------------------
-Write-Host "Fixing SSL requirement on PI Vision Content..."
-
-Set-WebConfigurationProperty `
-    -Filter "/system.webServer/security/access" `
-    -Name sslFlags `
-    -Value "None" `
-    -PSPath "IIS:\Sites\Default Web Site\PIVision"
-
-# -------------------------------
-# 5. Enable Static Content & Directory Browsing (Images fix)
-# -------------------------------
-Write-Host "Fixing Static Content..."
-
-Set-WebConfigurationProperty `
-    -Filter "/system.webServer/directoryBrowse" `
-    -Name enabled `
-    -Value true `
-    -PSPath "IIS:\Sites\Default Web Site\PIVision"
-
-# -------------------------------
-# 6. Restart IIS & PI Vision Services
-# -------------------------------
-Write-Host "Restarting IIS & PI Vision services..."
-
+# 3. Enable IIS Services
+Write-Host "Restarting IIS services..." -ForegroundColor Yellow
 iisreset
 
-Get-Service | Where-Object {
-    $_.Name -match "PIVision|PI-Web|PIWebAPI"
-} | Restart-Service -Force -ErrorAction SilentlyContinue
+# 4. Fix SSL Binding (PI Vision WAJIB HTTPS)
+Write-Host "Checking HTTPS binding..." -ForegroundColor Yellow
 
-# -------------------------------
-# DONE
-# -------------------------------
-Write-Host "=== PI VISION FIX COMPLETE ===" -ForegroundColor Green
-Write-Host "Access via: https://localhost/PIVision"
+Import-Module WebAdministration
+
+$httpsBinding = Get-WebBinding -Protocol https -ErrorAction SilentlyContinue
+if (-not $httpsBinding) {
+    Write-Host "Creating self-signed certificate..." -ForegroundColor Yellow
+
+    $cert = New-SelfSignedCertificate `
+        -DnsName "localhost" `
+        -CertStoreLocation "cert:\LocalMachine\My"
+
+    New-WebBinding -Name "Default Web Site" -Protocol https -Port 443
+    Get-WebBinding -Name "Default Web Site" -Protocol https |
+        Set-WebBinding -CertificateThumbprint $cert.Thumbprint -CertificateStoreName "My"
+}
+
+# 5. Pastikan Default Document
+Write-Host "Fixing Default Document..." -ForegroundColor Yellow
+Add-WebConfigurationProperty `
+  -Filter "system.webServer/defaultDocument/files" `
+  -Name "." `
+  -Value @{value="index.html"} `
+  -PSPath "IIS:\"
+
+# 6. Folder Permission (WAJIB)
+Write-Host "Fixing PI Vision folder permissions..." -ForegroundColor Yellow
+
+$piPath = "C:\Program Files\PIPC\PIVision"
+icacls $piPath /grant "IIS_IUSRS:(OI)(CI)RX" /T
+icacls $piPath /grant "IUSR:(OI)(CI)RX" /T
+
+# 7. Final IIS Reset
+iisreset
+
+Write-Host "=== PI VISION IIS FIX COMPLETED ===" -ForegroundColor Green
+Write-Host "Access PI Vision via: https://localhost/PIVision" -ForegroundColor Cyan
