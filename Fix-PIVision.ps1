@@ -1,134 +1,79 @@
 Write-Host "=== FINAL FIX PI VISION UI - WINDOWS SERVER 2022 ===" -ForegroundColor Cyan
 
-# -----------------------------
-# 1. Pastikan IIS & Role Feature (SERVER WAY)
-# -----------------------------
-Write-Host "Installing IIS Features (Server method)..." -ForegroundColor Yellow
-
-$features = @(
-    "Web-Server",
-    "Web-WebServer",
-    "Web-Common-Http",
-    "Web-Default-Doc",
-    "Web-Static-Content",
-    "Web-Http-Errors",
-    "Web-Http-Redirect",
-    "Web-Health",
-    "Web-Http-Logging",
-    "Web-Log-Libraries",
-    "Web-Request-Monitor",
-    "Web-Performance",
-    "Web-Stat-Compression",
-    "Web-Dyn-Compression",
-    "Web-Security",
-    "Web-Filtering",
-    "Web-Windows-Auth",
-    "Web-App-Dev",
-    "Web-Net-Ext45",
-    "Web-Asp-Net45",
-    "Web-ISAPI-Ext",
-    "Web-ISAPI-Filter",
-    "Web-Mgmt-Tools",
-    "Web-Mgmt-Console"
-)
-
-foreach ($f in $features) {
-    Install-WindowsFeature $f -ErrorAction SilentlyContinue | Out-Null
-}
-
-# -----------------------------
-# 2. Stop IIS
-# -----------------------------
-Write-Host "Stopping IIS..." -ForegroundColor Yellow
-iisreset /stop
-
-# -----------------------------
-# 3. Fix MIME TYPES (CRITICAL)
-# -----------------------------
-Write-Host "Fixing MIME Types..." -ForegroundColor Yellow
 Import-Module WebAdministration
 
-$mimeTypes = @{
-    ".svg"  = "image/svg+xml"
-    ".woff" = "font/woff"
-    ".woff2"= "font/woff2"
-    ".ttf"  = "font/ttf"
-    ".eot"  = "application/vnd.ms-fontobject"
-    ".json" = "application/json"
-}
+# 1. Stop IIS
+Write-Host "Stopping IIS..."
+iisreset /stop
 
-foreach ($ext in $mimeTypes.Keys) {
-    Remove-WebConfigurationProperty `
-        -pspath 'MACHINE/WEBROOT/APPHOST' `
-        -filter "system.webServer/staticContent/mimeMap[@fileExtension='$ext']" `
-        -name "." `
-        -ErrorAction SilentlyContinue
+# 2. Disable IIS Compression (SVG MUSUH COMPRESSION)
+Write-Host "Disabling IIS Compression..."
+Set-WebConfigurationProperty -Filter system.webServer/urlCompression `
+    -Name doStaticCompression -Value false
+Set-WebConfigurationProperty -Filter system.webServer/urlCompression `
+    -Name doDynamicCompression -Value false
 
-    Add-WebConfigurationProperty `
-        -pspath 'MACHINE/WEBROOT/APPHOST' `
+# 3. Remove ALL existing MIME mappings that break PI Vision
+Write-Host "Cleaning existing MIME mappings..."
+$mimePath = "MACHINE/WEBROOT/APPHOST"
+$mimeFilter = "system.webServer/staticContent/mimeMap"
+
+Get-WebConfigurationProperty -pspath $mimePath -filter $mimeFilter -name "." |
+Where-Object { $_.fileExtension -in ".svg",".json",".woff",".woff2",".ttf",".eot" } |
+ForEach-Object {
+    Remove-WebConfigurationProperty -pspath $mimePath `
         -filter "system.webServer/staticContent" `
         -name "." `
-        -value @{ fileExtension=$ext; mimeType=$mimeTypes[$ext] }
+        -AtElement @{fileExtension=$_.fileExtension}
 }
 
-# -----------------------------
-# 4. MATIKAN IIS COMPRESSION (BIANG KELADI UI RUSAK)
-# -----------------------------
-Write-Host "Disabling IIS Compression..." -ForegroundColor Yellow
-Set-WebConfigurationProperty `
-  -filter "system.webServer/httpCompression" `
-  -name "doStaticCompression" `
-  -value "false"
+# 4. Re-add MIME types (SAFE & CLEAN)
+Write-Host "Adding correct MIME types..."
+Add-WebConfigurationProperty -pspath $mimePath `
+  -filter "system.webServer/staticContent" -name "." `
+  -value @{fileExtension=".svg"; mimeType="image/svg+xml"}
 
-Set-WebConfigurationProperty `
-  -filter "system.webServer/httpCompression" `
-  -name "doDynamicCompression" `
-  -value "false"
+Add-WebConfigurationProperty -pspath $mimePath `
+  -filter "system.webServer/staticContent" -name "." `
+  -value @{fileExtension=".json"; mimeType="application/json"}
 
-# -----------------------------
-# 5. Pastikan Static Content Handler
-# -----------------------------
-Write-Host "Ensuring Static Content Handler..." -ForegroundColor Yellow
-Set-WebConfigurationProperty `
-  -filter "system.webServer/modules/add[@name='StaticFileModule']" `
-  -name "preCondition" `
-  -value ""
+Add-WebConfigurationProperty -pspath $mimePath `
+  -filter "system.webServer/staticContent" -name "." `
+  -value @{fileExtension=".woff"; mimeType="font/woff"}
 
-# -----------------------------
-# 6. Permission Folder PI Vision (INI WAJIB)
-# -----------------------------
-Write-Host "Fixing Folder Permissions..." -ForegroundColor Yellow
+Add-WebConfigurationProperty -pspath $mimePath `
+  -filter "system.webServer/staticContent" -name "." `
+  -value @{fileExtension=".woff2"; mimeType="font/woff2"}
 
+Add-WebConfigurationProperty -pspath $mimePath `
+  -filter "system.webServer/staticContent" -name "." `
+  -value @{fileExtension=".ttf"; mimeType="font/ttf"}
+
+Add-WebConfigurationProperty -pspath $mimePath `
+  -filter "system.webServer/staticContent" -name "." `
+  -value @{fileExtension=".eot"; mimeType="application/vnd.ms-fontobject"}
+
+# 5. Allow SVG in Request Filtering
+Write-Host "Fixing RequestFiltering..."
+Set-WebConfigurationProperty -pspath $mimePath `
+  -filter "system.webServer/security/requestFiltering/fileExtensions/add[@fileExtension='.svg']" `
+  -name allowed -value true -ErrorAction SilentlyContinue
+
+# 6. Fix Folder Permission
+Write-Host "Fixing folder permissions..."
 $paths = @(
  "C:\Program Files\PIPC\PIVision",
- "C:\Program Files\PIPC\PIVision\Content",
- "C:\Program Files\PIPC\PIVision\Images"
+ "C:\inetpub\wwwroot\PIVision"
 )
 
 foreach ($p in $paths) {
-    icacls $p /grant "IIS_IUSRS:(OI)(CI)RX" /T /C | Out-Null
+    if (Test-Path $p) {
+        icacls $p /grant "IIS_IUSRS:(OI)(CI)RX" /T | Out-Null
+    }
 }
 
-# -----------------------------
-# 7. AppPool Identity (INI KRUSIAL)
-# -----------------------------
-Write-Host "Fixing AppPool Identity..." -ForegroundColor Yellow
-
-Set-ItemProperty IIS:\AppPools\DefaultAppPool `
- -name processModel.identityType `
- -value ApplicationPoolIdentity
-
-# -----------------------------
-# 8. Clear IIS Cache
-# -----------------------------
-Write-Host "Clearing IIS Cache..." -ForegroundColor Yellow
-Remove-Item "C:\inetpub\temp\IIS Temporary Compressed Files" -Recurse -Force -ErrorAction SilentlyContinue
-
-# -----------------------------
-# 9. Start IIS
-# -----------------------------
-Write-Host "Starting IIS..." -ForegroundColor Green
+# 7. Start IIS
+Write-Host "Starting IIS..."
 iisreset /start
 
-Write-Host "=== DONE ===" -ForegroundColor Green
-Write-Host "REBOOT SERVER SEKARANG (WAJIB)" -ForegroundColor Red
+Write-Host "=== DONE. REBOOT SERVER SEKARANG (WAJIB) ===" -ForegroundColor Green
